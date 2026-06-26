@@ -55,27 +55,51 @@ def processar_pdf(pdf_path: str | Path, numero: str, nome: str | None, cfg: dict
     return classificar_texto(bruto, numero, nome, cfg)
 
 
-def rodar_cnpjs(cnpjs: list[str], cfg: dict, limite: int | None = None) -> None:
-    # Conecta no Chrome já liberado (CDP). Ver pré-requisito no topo do módulo.
+def coletar(cnpjs: list[str], cfg: dict, limite: int | None = None,
+            on_evento=None) -> dict:
+    """Coleta + classifica + grava. Reutilizável por CLI e front-end.
+
+    on_evento(tipo, msg): callback opcional de progresso. tipo ∈
+    {info, gravado, pulado, sem_sentenca, erro}. Devolve dict de estatísticas.
+    """
+    def emit(tipo, msg):
+        if on_evento:
+            on_evento(tipo, msg)
+        else:
+            print(msg)
+
     coletor = Coletor(config=cfg)
     ws = sheets._abrir_worksheet()
     ja = sheets.numeros_ja_gravados(ws)
+    st = {"gravados": 0, "pulados": 0, "sem_sentenca": 0, "erros": 0, "novos": []}
 
     for proc in coletor.coletar_cnpjs(cnpjs, limite=limite):
         if not proc.numero_processo:
-            print(f"  ! CNPJ {proc.cnpj}: {proc.erro}")
+            st["erros"] += 1
+            emit("erro", f"CNPJ {proc.cnpj}: {proc.erro}")
             continue
         if proc.numero_processo in ja:
-            print(f"  - {proc.numero_processo}: já gravado, pulando")
+            st["pulados"] += 1
+            emit("pulado", f"{proc.numero_processo}: já na planilha")
             continue
         if proc.erro or not proc.texto:
-            print(f"  . {proc.numero_processo}: {proc.erro or 'sem texto'}")
+            st["sem_sentenca"] += 1
+            emit("sem_sentenca", f"{proc.numero_processo}: {proc.erro or 'sem texto'}")
             continue
         reg = classificar_texto(proc.texto, proc.numero_processo, proc.nome_parte, cfg)
         sheets.gravar(reg, ws)
         ja.add(proc.numero_processo)
-        print(f"  + {proc.numero_processo}: {reg.get('tema_discussao')} "
-              f"({reg.get('oportunidade_prospeccao')})")
+        st["gravados"] += 1
+        st["novos"].append(reg)
+        emit("gravado", f"{proc.numero_processo}: {reg.get('nome_cliente')} | "
+             f"{reg.get('tema_discussao')} ({reg.get('oportunidade_prospeccao')})")
+    return st
+
+
+def rodar_cnpjs(cnpjs: list[str], cfg: dict, limite: int | None = None) -> None:
+    st = coletar(cnpjs, cfg, limite=limite)
+    print(f"\nresumo: {st['gravados']} gravados, {st['pulados']} pulados, "
+          f"{st['sem_sentenca']} sem sentença, {st['erros']} erros")
 
 
 def main(argv: list[str] | None = None) -> int:

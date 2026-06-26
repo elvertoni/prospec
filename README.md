@@ -32,7 +32,19 @@ copy .env.example .env   # preencher GEMINI_API_KEY, GOOGLE_SHEETS_ID, GOOGLE_SA
 # credentials/service_account.json e COMPARTILHAR a planilha com o e-mail da SA.
 ```
 
-## Uso
+## Uso pelo João (sem terminal)
+
+1. **Duplo clique em `iniciar.bat`** — abre o painel no navegador.
+2. Aba **Operar**:
+   - cola os CNPJs (um por linha)
+   - clica **🌐 Abrir Chrome** → resolve o Turnstile na janela que abrir
+   - clica **▶️ Coletar agora** → a IA classifica e grava
+3. Aba **Prospects**: vê e filtra os resultados (prioriza oportunidade *alta*).
+
+> O passo do Turnstile é manual de propósito (Cloudflare bloqueia robô). É o
+> único clique “chato”; o resto é automático.
+
+## Uso por linha de comando (dev)
 
 ```powershell
 # (todos os comandos usam o python do venv)
