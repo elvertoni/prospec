@@ -1,0 +1,37 @@
+# Configuração do coletor TRF4 (eProc).
+# Selectors ficam aqui porque o portal muda — calibrar sem tocar no código.
+# Calibre abrindo o portal com TRF4_HEADLESS=false e inspecionando os elementos.
+
+trf4:
+  url_consulta: "https://www.trf4.jus.br/trf4/controlador.php?acao=principal&"
+  secao: "JFPR"          # Justiça Federal do Paraná
+  situacao: "Baixados/Arquivados"
+  timeout_ms: 30000
+
+  # Selectors do form de consulta processual (CALIBRADOS via DOM em 2026-06).
+  selectors:
+    aceitar_privacidade: "#btnAceitoPoliticaPrivacidade"   # banner LGPD, fechar antes
+    select_forma: "#selForma"                              # tipo de busca
+    forma_label: "CPF/CNPJ da Parte"
+    select_secao: "#selOrigem"                             # TRF4/JFRS/JFSC/JFPR
+    campo_cpf_cnpj: "#txtValor"
+    check_baixados: "#chkMostrarBaixados"                  # checkbox (não select)
+    botao_pesquisar: "#botaoEnviar"
+    # --- abaixo: página de RESULTADOS e PROCESSO (calibrar com CNPJ real) ---
+    linhas_resultado: "table tr"
+    link_processo: "a"
+    link_mostrar_eventos: "a:has-text('próximos eventos')"
+    link_sentenca: "a:has-text('SENTENÇA'), a:has-text('Sentença')"
+    link_download_pdf: "a:has-text('PDF'), a[href$='.pdf']"
+
+  # Palavras que identificam o documento de sentença na lista de eventos.
+  termos_sentenca:
+    - "SENTENÇA"
+    - "Sentença"
+    - "Julgamento"
+
+gemini:
+  model: "gemini-2.5-flash"
+  temperature: 0.1
+  top_p: 0.95
+  response_mime_type: "application/json"

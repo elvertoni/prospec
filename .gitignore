@@ -1,0 +1,21 @@
+# segredos / credenciais — NUNCA commitar
+.env
+credentials/
+data/sessao.json
+
+# sessão do Chrome (cookies/clearance) e artefatos de coleta
+data/chrome-debug/
+data/.pw-profile/
+data/pdfs/
+data/dump_*.html
+
+# scripts de inspeção/debug one-off (raiz)
+tools_inspect*.py
+tools_cdp*.py
+tools_cookie_fetch.py
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.streamlit/secrets.toml
