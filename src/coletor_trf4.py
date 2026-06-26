@@ -22,6 +22,8 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
+from .util import CNJ, so_digitos
+
 RAIZ = Path(__file__).resolve().parent.parent
 
 CDP_URL = "http://127.0.0.1:9222"
@@ -32,15 +34,9 @@ URL_LISTA = (
     "&txtValor={cnpj}&selOrigem=PR&chkMostrarBaixados=S&txtOrigemPesquisa=1"
 )
 
-CNJ = re.compile(r"\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}")
-
 # rótulos do polo ativo no cabeçalho da sentença (eProc)
 _POLO_ATIVO = r"(?:AUTOR(?:A)?|IMPETRANTE|REQUERENTE|EXEQUENTE|EMBARGANTE|AGRAVANTE|APELANTE)"
 _RE_NOME = re.compile(_POLO_ATIVO + r"\s*:\s*(.+?)\s*(?:ADVOGAD|IMPETRAD|R[ÉE]U|REQUERID|EXECUTAD|MPF|MINIST[ÉE]RIO|\n)", re.I)
-
-
-def so_digitos(doc: str) -> str:
-    return re.sub(r"\D", "", doc or "")
 
 
 def nome_parte_ativa(texto: str) -> str | None:

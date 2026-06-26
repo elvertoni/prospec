@@ -1,7 +1,12 @@
 # segredos / credenciais — NUNCA commitar
 .env
+agente/.env
 credentials/
 data/sessao.json
+
+# estado runtime
+data/fila.sqlite
+data/*.log
 
 # sessão do Chrome (cookies/clearance) e artefatos de coleta
 data/chrome-debug/

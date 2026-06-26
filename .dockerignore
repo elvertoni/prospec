@@ -1,0 +1,11 @@
+.venv/
+data/
+credentials/
+.env
+agente/
+dashboard.py
+tools_*.py
+__pycache__/
+*.pyc
+.git/
+iniciar.bat

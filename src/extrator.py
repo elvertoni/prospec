@@ -9,13 +9,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pdfplumber
-
 GATILHOS_DISPOSITIVO = ["ante o exposto", "isto posto", "isso posto", "julgo"]
 
 
 def pdf_para_texto(caminho_pdf: str | Path) -> str:
     """Extrai todo o texto do PDF (camada de texto; sem OCR aqui)."""
+    import pdfplumber  # lazy: só o modo --pdf precisa; servidor não carrega
     partes: list[str] = []
     with pdfplumber.open(str(caminho_pdf)) as pdf:
         for pagina in pdf.pages:
