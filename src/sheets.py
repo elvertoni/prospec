@@ -10,6 +10,8 @@ import os
 import gspread
 from google.oauth2.service_account import Credentials
 
+from .enriquecimento import enriquecer_registro
+
 ESCOPOS = ["https://www.googleapis.com/auth/spreadsheets"]
 
 CABECALHO = [
@@ -47,6 +49,7 @@ def numeros_ja_gravados(ws=None) -> set[str]:
 def gravar(registro: dict, ws=None) -> None:
     """Append de uma linha na planilha a partir do dict da triagem."""
     ws = ws or _abrir_worksheet()
+    enriquecer_registro(registro)
     linha = [_fmt(registro.get(c)) for c in CABECALHO]
     ws.append_row(linha, value_input_option="USER_ENTERED")
 

@@ -44,6 +44,13 @@ def adicionar(cnpjs: list[str]) -> int:
                 "INSERT OR IGNORE INTO jobs(cnpj,status,criado_em,atualizado_em) "
                 "VALUES (?,?,?,?)", (cnpj, "pendente", agora, agora))
             novos += cur.rowcount
+            if cur.rowcount == 0:
+                cur = c.execute(
+                    "UPDATE jobs SET status='pendente', worker=NULL, erro=NULL, "
+                    "atualizado_em=? WHERE cnpj=? AND status='erro'",
+                    (agora, cnpj),
+                )
+                novos += cur.rowcount
     return novos
 
 

@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 
 from . import classificador, extrator, sheets
 from .coletor_trf4 import Coletor, so_digitos
+from .enriquecimento import enriquecer_registro
 
 RAIZ = Path(__file__).resolve().parent.parent
 CONFIG = RAIZ / "config.yaml"
@@ -87,6 +88,7 @@ def coletar(cnpjs: list[str], cfg: dict, limite: int | None = None,
             emit("sem_sentenca", f"{proc.numero_processo}: {proc.erro or 'sem texto'}")
             continue
         reg = classificar_texto(proc.texto, proc.numero_processo, proc.nome_parte, cfg)
+        enriquecer_registro(reg, cnpj=proc.cnpj, nome_parte=proc.nome_parte)
         sheets.gravar(reg, ws)
         ja.add(proc.numero_processo)
         st["gravados"] += 1

@@ -21,6 +21,7 @@ import secrets
 from pathlib import Path
 
 import yaml
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Form, HTTPException, Header, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -28,11 +29,13 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from src import classificador, extrator, sheets
+from src.enriquecimento import enriquecer_registro
 from src.util import so_digitos
 from . import db
 
 RAIZ = Path(__file__).resolve().parent.parent
 CONFIG = RAIZ / "config.yaml"
+load_dotenv(RAIZ / ".env")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 app = FastAPI(title="Prospecção Tributária TRF4")
@@ -67,19 +70,46 @@ def agente_auth(x_agent_token: str = Header(default="")) -> None:
 
 # ---------- painel (humano) ----------
 @app.get("/", response_class=HTMLResponse)
-def painel(request: Request, _: str = Depends(painel_auth)):
+def painel(
+    request: Request,
+    oportunidade: str = "",
+    status_fila: str = "",
+    busca: str = "",
+    _: str = Depends(painel_auth),
+):
     try:
         registros = sheets._abrir_worksheet().get_all_records()
     except Exception as e:  # noqa: BLE001
         registros = []
         print("aviso sheets:", e)
-    altos = [r for r in registros if str(r.get("oportunidade_prospeccao")).lower() == "alta"]
-    return templates.TemplateResponse("index.html", {
+
+    fila = db.listar()
+    oportunidade = oportunidade.strip().lower()
+    status_fila = status_fila.strip().lower()
+    busca = busca.strip()
+
+    prospects = _filtrar_prospects(registros, oportunidade, busca)
+    fila_filtrada = [j for j in fila if not status_fila or j.get("status") == status_fila]
+    altos = [r for r in registros if _lower(r.get("oportunidade_prospeccao")) == "alta"]
+
+    return templates.TemplateResponse(request, "index.html", {
         "request": request,
-        "fila": db.listar(),
+        "fila": fila_filtrada,
         "resumo": db.resumo(),
-        "prospects": registros,
+        "sem_prospect": sum(
+            1 for j in fila
+            if j.get("status") == "concluido" and int(j.get("gravados") or 0) == 0
+        ),
+        "prospects": prospects,
+        "total_prospects": len(registros),
         "altos": altos,
+        "filtros": {
+            "oportunidade": oportunidade,
+            "status_fila": status_fila,
+            "busca": busca,
+        },
+        "opcoes_oportunidade": _opcoes(registros, "oportunidade_prospeccao"),
+        "opcoes_status": _opcoes(fila, "status"),
     })
 
 
@@ -122,9 +152,36 @@ def ingest(item: Ingest):
     reg = classificador.classificar(
         item.nome_parte, item.numero_processo, recorte,
         model=g["model"], temperature=g["temperature"], top_p=g["top_p"])
+    enriquecer_registro(reg, cnpj=item.cnpj, nome_parte=item.nome_parte)
     sheets.gravar(reg, ws)
     return {"status": "gravado", "tema": reg.get("tema_discussao"),
             "oportunidade": reg.get("oportunidade_prospeccao")}
+
+
+def _lower(v) -> str:
+    return str(v or "").strip().lower()
+
+
+def _opcoes(rows: list[dict], campo: str) -> list[str]:
+    return sorted({_lower(r.get(campo)) for r in rows if _lower(r.get(campo))})
+
+
+def _filtrar_prospects(registros: list[dict], oportunidade: str, busca: str) -> list[dict]:
+    termos = _lower(busca)
+    campos_busca = (
+        "nome_cliente", "cnpj", "numero_processo", "tema_discussao",
+        "tese_especifica", "justificativa_oportunidade",
+    )
+    out = []
+    for r in registros:
+        if oportunidade and _lower(r.get("oportunidade_prospeccao")) != oportunidade:
+            continue
+        if termos:
+            haystack = " ".join(_lower(r.get(c)) for c in campos_busca)
+            if termos not in haystack:
+                continue
+        out.append(r)
+    return out
 
 
 class JobDone(BaseModel):

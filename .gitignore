@@ -3,6 +3,8 @@
 agente/.env
 credentials/
 data/sessao.json
+data/dj.json
+data/nums*.json
 
 # estado runtime
 data/fila.sqlite

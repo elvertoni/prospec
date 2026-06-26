@@ -1,5 +1,4 @@
 @echo off
-REM Duplo clique para abrir o painel de prospeccao no navegador.
+REM Atalho principal do sistema.
 cd /d "%~dp0"
-".venv\Scripts\streamlit.exe" run dashboard.py
-pause
+call "USAR_SISTEMA.bat"
