@@ -26,3 +26,7 @@ __pycache__/
 *.pyc
 .venv/
 .streamlit/secrets.toml
+
+# artefatos de teste / playwright
+.playwright-mcp/
+painel-rmsa.png
