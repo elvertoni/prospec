@@ -167,11 +167,16 @@ if rodar:
                     log(f"⚪ {proc.numero_processo}: {proc.erro or 'sem texto de sentença'}")
                     continue
                 log(f"🧠 {proc.numero_processo}: classificando tema com IA...")
-                tema = classificar_tema(
-                    extrator.trecho_para_tema(proc.texto),
-                    numero_processo=proc.numero_processo,
-                    model=g["model"], temperature=g["temperature"], top_p=g["top_p"],
-                )
+                try:
+                    tema = classificar_tema(
+                        extrator.trecho_para_tema(proc.texto),
+                        numero_processo=proc.numero_processo,
+                        model=g["model"], temperature=g["temperature"],
+                        top_p=g["top_p"], on_status=log,
+                    )
+                except Exception as e:  # noqa: BLE001 — IA falhou: não derruba a coleta
+                    tema = "(reclassificar)"
+                    log(f"⚠️ {proc.numero_processo}: IA falhou ({e}); gravando sem tema.")
                 nome = proc.nome_parte or f"CNPJ {proc.cnpj}"
                 sheets.gravar(nome, proc.numero_processo, tema, ws)
                 ja.add(proc.numero_processo)
