@@ -29,7 +29,7 @@ def _abrir_worksheet():
     except gspread.WorksheetNotFound:
         ws = planilha.add_worksheet(title=aba, rows=1000, cols=len(CABECALHO))
     if ws.row_count == 0 or not ws.acell("A1").value:
-        ws.update("A1", [CABECALHO])
+        ws.update(values=[CABECALHO], range_name="A1")
     return ws
 
 
