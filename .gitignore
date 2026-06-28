@@ -30,3 +30,4 @@ __pycache__/
 # artefatos de teste / playwright
 .playwright-mcp/
 painel-rmsa.png
+painel-*.png

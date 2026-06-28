@@ -110,73 +110,86 @@ if rodar:
         st.warning("Insira ao menos um CNPJ.")
         st.stop()
 
-    chrome = st.empty()
     if porta_debug_ativa():
-        chrome.success("✅ Chrome de depuração conectado.")
+        st.caption("✅ Chrome de depuração conectado.")
     else:
-        chrome.warning("🌐 Abrindo o Chrome de depuração...")
+        aviso = st.empty()
+        aviso.warning("🌐 Abrindo o Chrome de depuração...")
         if not abrir_chrome():
-            chrome.error("❌ Não consegui abrir o Chrome. Abra manualmente com "
-                         "--remote-debugging-port=9222 e tente de novo.")
+            aviso.error("❌ Não consegui abrir o Chrome. Abra manualmente com "
+                        "--remote-debugging-port=9222 e tente de novo.")
             st.stop()
-        chrome.success("✅ Chrome aberto. Faça uma consulta e resolva o Turnstile, se aparecer.")
-    time.sleep(1)
-    chrome.empty()
+        aviso.info("🌐 Chrome aberto. Se aparecer o Turnstile, resolva na janela.")
 
-    status_box = st.empty()
-    prog = st.progress(0.0)
+    novos: list[dict] = []
+    erros_lista: list[str] = []
 
-    def atualizar(msg: str):
-        status_box.markdown(f"**Status:** {msg}")
+    with st.status("Coletando no TRF4...", expanded=True) as status:
+        def log(msg: str):
+            status.write(msg)
 
-    try:
-        cfg = carregar_cfg()
-        g = cfg["gemini"]
-        coletor = Coletor(config=cfg)
+        try:
+            cfg = carregar_cfg()
+            g = cfg["gemini"]
+            coletor = Coletor(config=cfg)
 
-        atualizar("Conectando à planilha...")
-        ws = sheets._abrir_worksheet()
-        ja = sheets.numeros_ja_gravados(ws)
+            log("🔗 Conectando à planilha...")
+            ws = sheets._abrir_worksheet()
+            ja = sheets.numeros_ja_gravados(ws)
 
-        atualizar("Buscando processos no TRF4...")
-        procs = coletor.coletar_cnpjs(cnpjs, limite=limite or None, on_status=atualizar)
+            log("🔎 Buscando processos no TRF4...")
+            procs = coletor.coletar_cnpjs(cnpjs, limite=limite or None, on_status=log)
 
-        total = len(procs) or 1
-        novos: list[dict] = []
-        erros_lista = [p.erro for p in procs if not p.numero_processo and p.erro]
-        for i, proc in enumerate(procs, 1):
-            prog.progress(i / total)
-            if not proc.numero_processo or proc.numero_processo in ja:
-                continue
-            if proc.erro or not proc.texto:
-                continue
-            atualizar(f"Classificando tema (IA): {proc.numero_processo}...")
-            tema = classificar_tema(
-                extrator.trecho_para_tema(proc.texto),
-                numero_processo=proc.numero_processo,
-                model=g["model"], temperature=g["temperature"], top_p=g["top_p"],
-            )
-            nome = proc.nome_parte or f"CNPJ {proc.cnpj}"
-            sheets.gravar(nome, proc.numero_processo, tema, ws)
-            ja.add(proc.numero_processo)
-            novos.append({
-                "NOME CLIENTE": nome,
-                "NUMERO DO PROCESSO": proc.numero_processo,
-                "TEMA DA DISCUSSÃO": tema,
-            })
+            erros_lista = [p.erro for p in procs if not p.numero_processo and p.erro]
+            pulados_sentenca = pulados_planilha = 0
 
-        prog.empty()
-        status_box.empty()
-        if novos:
-            st.success(f"🎉 {len(novos)} processo(s) novo(s) gravado(s) na planilha.")
-            st.dataframe(pd.DataFrame(novos), use_container_width=True, hide_index=True)
-        elif erros_lista:
-            st.error("⚠️ Não foi possível listar os processos:\n\n" +
-                     "\n".join(f"- {e}" for e in erros_lista))
-        else:
-            st.info("Nada novo: sem sentença de mérito ou já estavam na planilha.")
-    except Exception as e:  # noqa: BLE001
-        prog.empty()
-        status_box.empty()
-        st.error(f"Falha na coleta: {e}")
-        st.caption("Confira se o Chrome 9222 está aberto e o Turnstile resolvido.")
+            for proc in procs:
+                if not proc.numero_processo:
+                    continue
+                if proc.numero_processo in ja:
+                    pulados_planilha += 1
+                    log(f"⏭️ {proc.numero_processo}: já estava na planilha")
+                    continue
+                if proc.erro or not proc.texto:
+                    pulados_sentenca += 1
+                    log(f"⚪ {proc.numero_processo}: {proc.erro or 'sem texto de sentença'}")
+                    continue
+                log(f"🧠 {proc.numero_processo}: classificando tema com IA...")
+                tema = classificar_tema(
+                    extrator.trecho_para_tema(proc.texto),
+                    numero_processo=proc.numero_processo,
+                    model=g["model"], temperature=g["temperature"], top_p=g["top_p"],
+                )
+                nome = proc.nome_parte or f"CNPJ {proc.cnpj}"
+                sheets.gravar(nome, proc.numero_processo, tema, ws)
+                ja.add(proc.numero_processo)
+                novos.append({
+                    "NOME CLIENTE": nome,
+                    "NUMERO DO PROCESSO": proc.numero_processo,
+                    "TEMA DA DISCUSSÃO": tema,
+                })
+                log(f"✅ {proc.numero_processo}: {nome} — {tema}")
+
+            resumo = (f"{len(novos)} gravados · {pulados_sentenca} sem sentença · "
+                      f"{pulados_planilha} já existiam")
+            if erros_lista:
+                status.update(label=f"Concluído com avisos — {resumo}", state="error")
+            else:
+                status.update(label=f"Concluído — {resumo}", state="complete")
+        except Exception as e:  # noqa: BLE001
+            log(f"❌ {e}")
+            status.update(label="Falha na coleta", state="error")
+            erros_lista = erros_lista or [str(e)]
+
+    # ---- resultado fora do log ----
+    if novos:
+        st.success(f"🎉 {len(novos)} processo(s) novo(s) gravado(s) na planilha.")
+        st.dataframe(pd.DataFrame(novos), use_container_width=True, hide_index=True)
+    elif erros_lista:
+        st.error("**Não foi possível listar os processos:**\n\n" +
+                 "\n".join(f"- {e}" for e in erros_lista))
+        st.caption("Dica: no Chrome aberto, refaça a consulta (CPF/CNPJ da Parte, "
+                   "SJ Paraná), resolva o Turnstile e deixe a lista carregar; depois clique Coletar.")
+    else:
+        st.info("Nada novo: nenhum processo com sentença de mérito (ou já estavam na planilha). "
+                "Veja o log acima para o detalhe processo a processo.")
