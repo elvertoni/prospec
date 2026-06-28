@@ -129,15 +129,31 @@ class Coletor:
 
         # Espera ativa: o Turnstile pode aparecer. Aguarda até a lista carregar
         # (links com nº CNJ) ou a página dizer que não há processos.
-        for i in range(120):
+        for i in range(60):
             corpo = (pg.inner_text("body") or "").lower()
             sem_registro = "nenhum registro" in corpo or "não foram encontrados" in corpo
             tem_links = any(CNJ.search((a.inner_text() or "")) for a in pg.query_selector_all("a"))
             if tem_links or sem_registro:
                 break
+            # Sessão fria: o GET direto foi redirecionado para a tela de
+            # formulário (acontece quando o Turnstile/PHPSESSID expira). Não
+            # adianta esperar — o humano precisa refazer a busca no Chrome.
+            sessao_fria = (
+                "consulta_processual_pesquisa" in pg.url
+                or "selecionar uma forma de pesquisa" in corpo
+                or "é necessário" in corpo and "forma de pesquisa" in corpo
+            )
+            if sessao_fria and i >= 3:
+                raise RuntimeError(
+                    "Sessão do TRF4 expirou (ou o Turnstile não foi resolvido). "
+                    "No Chrome que está aberto: faça uma consulta manual "
+                    "(forma 'CPF/CNPJ da Parte', seção 'SJ Paraná'), resolva o "
+                    "Turnstile e deixe a lista de processos carregar. Depois clique "
+                    "Coletar de novo."
+                )
             if on_status and i % 5 == 0:
-                on_status("⚠️ Desafio Cloudflare (Turnstile) detectado. "
-                          "Resolva-o na janela do Chrome para prosseguir.")
+                on_status("⚠️ Aguardando a lista do TRF4. Se aparecer o desafio "
+                          "Cloudflare (Turnstile) no Chrome, resolva-o.")
             pg.wait_for_timeout(1000)
         else:
             raise TimeoutError("Tempo esgotado esperando o Turnstile/carregamento dos processos.")

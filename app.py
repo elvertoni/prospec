@@ -143,6 +143,7 @@ if rodar:
 
         total = len(procs) or 1
         novos: list[dict] = []
+        erros_lista = [p.erro for p in procs if not p.numero_processo and p.erro]
         for i, proc in enumerate(procs, 1):
             prog.progress(i / total)
             if not proc.numero_processo or proc.numero_processo in ja:
@@ -169,6 +170,9 @@ if rodar:
         if novos:
             st.success(f"🎉 {len(novos)} processo(s) novo(s) gravado(s) na planilha.")
             st.dataframe(pd.DataFrame(novos), use_container_width=True, hide_index=True)
+        elif erros_lista:
+            st.error("⚠️ Não foi possível listar os processos:\n\n" +
+                     "\n".join(f"- {e}" for e in erros_lista))
         else:
             st.info("Nada novo: sem sentença de mérito ou já estavam na planilha.")
     except Exception as e:  # noqa: BLE001
