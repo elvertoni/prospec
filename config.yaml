@@ -8,6 +8,11 @@ trf4:
   situacao: "Baixados/Arquivados"
   timeout_ms: 30000
 
+  # Robustez (a sessão do TRF4 degrada com o uso — ver coletor_trf4.py):
+  throttle_ms: 1500              # espera entre processos (anti rate-limit)
+  retries_processo: 3           # tentativas de abrir um processo até vir a tabela
+  vazios_seguidos_aborta: 3     # páginas vazias seguidas -> aborta e pede reaquecer
+
   # Selectors do form de consulta processual (CALIBRADOS via DOM em 2026-06).
   selectors:
     # IDs recalibrados 2026-06-28: o eProc passou a sufixar os IDs com "I"

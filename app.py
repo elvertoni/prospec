@@ -12,6 +12,7 @@ Rodar:
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 import urllib.request
@@ -53,19 +54,22 @@ def abrir_chrome() -> bool:
     """Abre o Chrome com a porta de depuração se ainda não estiver ativa."""
     if porta_debug_ativa():
         return True
+    localapp = os.environ.get("LOCALAPPDATA", "")
     candidatos = [
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        os.path.join(localapp, r"Google\Chrome\Application\chrome.exe") if localapp else "",
     ]
-    exe = next((c for c in candidatos if Path(c).exists()), None)
+    exe = next((c for c in candidatos if c and Path(c).exists()), None)
     if not exe:
         return False
     PERFIL_DIR.mkdir(parents=True, exist_ok=True)
+    # perfil dedicado garante instância separada mesmo com Chrome normal aberto
     subprocess.Popen([
         exe, "--remote-debugging-port=9222",
         f"--user-data-dir={PERFIL_DIR.resolve()}", "about:blank",
     ])
-    for _ in range(10):
+    for _ in range(20):  # Chrome frio pode demorar; espera até ~10s
         time.sleep(0.5)
         if porta_debug_ativa():
             return True
@@ -123,6 +127,8 @@ if rodar:
 
     novos: list[dict] = []
     erros_lista: list[str] = []
+    bloqueados = 0
+    sessao_degradou = False
 
     with st.status("Coletando no TRF4...", expanded=True) as status:
         def log(msg: str):
@@ -141,7 +147,9 @@ if rodar:
             procs = coletor.coletar_cnpjs(cnpjs, limite=limite or None, on_status=log)
 
             erros_lista = [p.erro for p in procs if not p.numero_processo and p.erro]
-            pulados_sentenca = pulados_planilha = 0
+            sessao_degradou = any(
+                (p.erro or "").startswith("SESSAO_DEGRADADA") for p in procs)
+            pulados_sentenca = pulados_planilha = bloqueados = 0
 
             for proc in procs:
                 if not proc.numero_processo:
@@ -149,6 +157,10 @@ if rodar:
                 if proc.numero_processo in ja:
                     pulados_planilha += 1
                     log(f"⏭️ {proc.numero_processo}: já estava na planilha")
+                    continue
+                if proc.bloqueado:
+                    bloqueados += 1
+                    log(f"🟡 {proc.numero_processo}: não verificado (portal bloqueou)")
                     continue
                 if proc.erro or not proc.texto:
                     pulados_sentenca += 1
@@ -171,9 +183,9 @@ if rodar:
                 log(f"✅ {proc.numero_processo}: {nome} — {tema}")
 
             resumo = (f"{len(novos)} gravados · {pulados_sentenca} sem sentença · "
-                      f"{pulados_planilha} já existiam")
-            if erros_lista:
-                status.update(label=f"Concluído com avisos — {resumo}", state="error")
+                      f"{bloqueados} não verificados · {pulados_planilha} já existiam")
+            if sessao_degradou or erros_lista:
+                status.update(label=f"Interrompido — {resumo}", state="error")
             else:
                 status.update(label=f"Concluído — {resumo}", state="complete")
         except Exception as e:  # noqa: BLE001
@@ -185,11 +197,19 @@ if rodar:
     if novos:
         st.success(f"🎉 {len(novos)} processo(s) novo(s) gravado(s) na planilha.")
         st.dataframe(pd.DataFrame(novos), use_container_width=True, hide_index=True)
-    elif erros_lista:
-        st.error("**Não foi possível listar os processos:**\n\n" +
-                 "\n".join(f"- {e}" for e in erros_lista))
-        st.caption("Dica: no Chrome aberto, refaça a consulta (CPF/CNPJ da Parte, "
-                   "SJ Paraná), resolva o Turnstile e deixe a lista carregar; depois clique Coletar.")
-    else:
-        st.info("Nada novo: nenhum processo com sentença de mérito (ou já estavam na planilha). "
-                "Veja o log acima para o detalhe processo a processo.")
+    if sessao_degradou or bloqueados:
+        st.warning(
+            f"🟡 {bloqueados} processo(s) não verificado(s): o TRF4 parou de entregar "
+            "as páginas (sessão esfriou). **Reaqueça e clique Coletar de novo** — os já "
+            "gravados não repetem, só os pendentes serão tentados.\n\n"
+            "Como reaquecer: no Chrome aberto, refaça a consulta (forma 'CPF/CNPJ da "
+            "Parte', seção 'SJ Paraná'), resolva o Turnstile e deixe a lista carregar.")
+    if not novos and not bloqueados:
+        if erros_lista:
+            st.error("**Não foi possível listar os processos:**\n\n" +
+                     "\n".join(f"- {e}" for e in erros_lista))
+            st.caption("Dica: no Chrome aberto, refaça a consulta (CPF/CNPJ da Parte, "
+                       "SJ Paraná), resolva o Turnstile e deixe a lista carregar; depois Coletar.")
+        else:
+            st.info("Nada novo: nenhum processo com sentença de mérito (ou já estavam na "
+                    "planilha). Veja o log acima para o detalhe processo a processo.")

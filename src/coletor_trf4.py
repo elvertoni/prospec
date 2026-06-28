@@ -12,7 +12,15 @@ humano resolvendo. Solução que funciona (confirmada 2026-06):
        lista processos do CNPJ -> abre cada um -> expande eventos ->
        acha a SENTENÇA -> lê o TEXTO do documento (HTML, sem PDF).
 
-A sessão (PHPSESSID) liberada pelo humano basta; não há cf_clearance persistente.
+CONFIABILIDADE: a sessão do TRF4 DEGRADA com o uso. Após resolver o Turnstile há
+uma janela curta; conforme abrimos vários processos rápido, o portal passa a
+servir páginas VAZIAS (sem a tabela de eventos) e depois exige o Turnstile de
+novo. Por isso:
+  - página vazia NÃO é tratada como "sem sentença" (seria falso negativo);
+  - reabrimos o processo com espera crescente (retry) antes de desistir;
+  - há um throttle entre processos para não disparar o rate-limit;
+  - se várias páginas vierem vazias em sequência, ABORTAMOS com aviso para o
+    humano reaquecer a sessão — em vez de varrer tudo gerando lixo.
 """
 from __future__ import annotations
 
@@ -38,6 +46,15 @@ URL_LISTA = (
 _POLO_ATIVO = r"(?:AUTOR(?:A)?|IMPETRANTE|REQUERENTE|EXEQUENTE|EMBARGANTE|AGRAVANTE|APELANTE)"
 _RE_NOME = re.compile(_POLO_ATIVO + r"\s*:\s*(.+?)\s*(?:ADVOGAD|IMPETRAD|R[ÉE]U|REQUERID|EXECUTAD|MPF|MINIST[ÉE]RIO|\n)", re.I)
 
+# parâmetros de robustez (default; sobrescrevíveis via config["trf4"])
+THROTTLE_MS = 1500          # espera entre processos (anti rate-limit)
+RETRIES_PROCESSO = 3        # tentativas de abrir um processo até ter a tabela
+VAZIOS_SEGUIDOS_ABORTA = 3  # páginas vazias em sequência -> sessão degradou
+
+
+class PaginaBloqueada(Exception):
+    """Página do processo veio sem a tabela de eventos (portal bloqueou/não carregou)."""
+
 
 def nome_parte_ativa(texto: str) -> str | None:
     """Extrai o nome do polo ativo do cabeçalho da sentença, se houver."""
@@ -56,6 +73,7 @@ class ProcessoColetado:
     movimento: str | None = None   # rótulo do evento de sentença
     texto: str | None = None       # texto da sentença (p/ a IA)
     erro: str | None = None
+    bloqueado: bool = False         # True = não verificado (portal bloqueou), reprocessar
 
 
 @dataclass
@@ -63,18 +81,29 @@ class Coletor:
     config: dict
     cdp_url: str = CDP_URL
 
+    def _cfg(self, chave: str, default):
+        return (self.config.get("trf4") or {}).get(chave, default)
+
     def coletar_cnpjs(
         self,
         cnpjs: list[str],
         limite: int | None = None,
         on_status=None,
     ) -> list[ProcessoColetado]:
-        """Varre TODOS os processos do CNPJ e abre os que têm sentença.
+        """Varre os processos do CNPJ e abre os que têm sentença.
 
-        Sem pré-filtro: não perde tema. `limite` corta nº de processos por CNPJ
-        (teste/throttle). `on_status(msg)` é um callback opcional de progresso
-        (usado pelo painel para mostrar o que está acontecendo).
+        `limite` corta nº de processos por CNPJ. `on_status(msg)` é callback de
+        progresso. Distingue 'sem sentença' (real) de 'bloqueado' (portal não
+        entregou a página — reprocessar). Aborta com SessaoDegradada se a sessão
+        esfriar no meio.
         """
+        throttle = int(self._cfg("throttle_ms", THROTTLE_MS))
+        aborta = int(self._cfg("vazios_seguidos_aborta", VAZIOS_SEGUIDOS_ABORTA))
+
+        def emit(msg):
+            if on_status:
+                on_status(msg)
+
         out: list[ProcessoColetado] = []
         with sync_playwright() as p:
             try:
@@ -88,8 +117,7 @@ class Coletor:
             pg = ctx.pages[0] if ctx.pages else ctx.new_page()
             for cnpj in cnpjs:
                 cnpj_num = so_digitos(cnpj)
-                if on_status:
-                    on_status(f"Iniciando coleta para o CNPJ {cnpj_num}...")
+                emit(f"Iniciando coleta para o CNPJ {cnpj_num}...")
                 print(f"[CNPJ] {cnpj_num}")
                 try:
                     procs = self._listar(pg, cnpj_num, on_status=on_status)
@@ -97,30 +125,50 @@ class Coletor:
                     out.append(ProcessoColetado(cnpj_num, "", erro=f"lista: {e}"))
                     continue
                 print(f"  {len(procs)} processos na lista")
-                if on_status:
-                    on_status(f"CNPJ {cnpj_num}: {len(procs)} processos encontrados.")
+                emit(f"CNPJ {cnpj_num}: {len(procs)} processos encontrados.")
                 if limite:
                     procs = procs[:limite]
-                for numero, href in procs:
+
+                vazios_seguidos = 0
+                for idx, (numero, href) in enumerate(procs, 1):
                     rc = ProcessoColetado(cnpj=cnpj_num, numero_processo=numero)
                     try:
-                        if on_status:
-                            on_status(f"Processo {numero}: acessando detalhes...")
-                        sent = self._sentenca(pg, href)
+                        emit(f"[{idx}/{len(procs)}] {numero}: abrindo...")
+                        tab = self._abrir_eventos(pg, href)  # retry; PaginaBloqueada se vazio
+                        vazios_seguidos = 0
+                        sent = self._achar_sentenca(tab)
                         if not sent:
                             rc.erro = "sem sentença de mérito"
-                            if on_status:
-                                on_status(f"Processo {numero}: sem sentença de mérito.")
+                            emit(f"[{idx}/{len(procs)}] {numero}: sem sentença de mérito.")
                         else:
                             doc_href, mov = sent
                             rc.movimento = mov
-                            if on_status:
-                                on_status(f"Processo {numero}: baixando sentença ({mov})...")
+                            emit(f"[{idx}/{len(procs)}] {numero}: baixando sentença ({mov})...")
                             rc.texto = self._texto_doc(ctx, doc_href)
                             rc.nome_parte = nome_parte_ativa(rc.texto)
+                    except PaginaBloqueada:
+                        vazios_seguidos += 1
+                        rc.bloqueado = True
+                        rc.erro = "não verificado (portal bloqueou — reprocessar)"
+                        emit(f"[{idx}/{len(procs)}] {numero}: ⚠️ página não carregou "
+                             f"({vazios_seguidos}/{aborta}).")
+                        if vazios_seguidos >= aborta:
+                            out.append(rc)
+                            emit("⛔ A sessão do TRF4 degradou (várias páginas vazias). "
+                                 "Reaqueça: no Chrome, refaça a consulta e resolva o "
+                                 "Turnstile; depois clique Coletar de novo (os já "
+                                 "gravados não repetem).")
+                            # interrompe preservando tudo o que já foi coletado
+                            out.append(ProcessoColetado(
+                                cnpj_num, "", bloqueado=True,
+                                erro="SESSAO_DEGRADADA: a sessão do TRF4 esfriou no meio "
+                                     "da coleta. Reaqueça o Turnstile no Chrome e clique "
+                                     "Coletar de novo — os já gravados não repetem."))
+                            return out
                     except Exception as e:  # noqa: BLE001
                         rc.erro = f"coleta: {e}"
                     out.append(rc)
+                    pg.wait_for_timeout(throttle)
             return out
 
     # --- passos internos -------------------------------------------------
@@ -141,7 +189,7 @@ class Coletor:
             sessao_fria = (
                 "consulta_processual_pesquisa" in pg.url
                 or "selecionar uma forma de pesquisa" in corpo
-                or "é necessário" in corpo and "forma de pesquisa" in corpo
+                or ("é necessário" in corpo and "forma de pesquisa" in corpo)
             )
             if sessao_fria and i >= 3:
                 raise RuntimeError(
@@ -172,23 +220,41 @@ class Coletor:
                     procs.append((num, href))
         return procs
 
-    def _sentenca(self, pg, href: str) -> tuple[str, str] | None:
-        """Abre o detalhe, expande eventos e devolve (doc_href, movimento) da sentença."""
-        pg.goto(href, timeout=40000, wait_until="load")
-        pg.wait_for_timeout(1500)
-        for _ in range(8):
-            link = pg.query_selector("text=mostrar os próximos eventos")
-            if not link:
-                break
-            try:
-                link.click()
-                pg.wait_for_timeout(1000)
-            except Exception:
-                break
-        tab = pg.query_selector("table.tabela")
-        if not tab:
-            return None
-        # prioriza "Sentença com Resolução de Mérito"; aceita qualquer "Sentença"
+    def _abrir_eventos(self, pg, href: str):
+        """Abre o detalhe do processo e devolve o handle da tabela de eventos.
+
+        Reabre com espera crescente até a tabela aparecer (o portal às vezes
+        serve a página vazia sob carga). Se não vier após as tentativas, levanta
+        PaginaBloqueada — para NÃO confundir com 'processo sem sentença'.
+        """
+        retries = int(self._cfg("retries_processo", RETRIES_PROCESSO))
+        for tentativa in range(1, retries + 1):
+            pg.goto(href, timeout=40000, wait_until="load")
+            pg.wait_for_timeout(800 + 700 * tentativa)  # 1.5s, 2.2s, 2.9s...
+            # expande todos os blocos de eventos
+            for _ in range(10):
+                link = pg.query_selector("text=mostrar os próximos eventos")
+                if not link:
+                    break
+                try:
+                    link.click()
+                    pg.wait_for_timeout(800)
+                except Exception:
+                    break
+            tab = pg.query_selector("table.tabela")
+            if tab and len(tab.query_selector_all("tr")) > 1:
+                return tab
+            # página veio vazia/incompleta: detecta sessão fria explícita
+            corpo = (pg.inner_text("body") or "").lower()
+            if "consulta_processual_pesquisa" in pg.url or any(
+                x in corpo for x in ("cloudflare", "verifique que", "sou humano")
+            ):
+                break  # não adianta retry — sessão fria
+        raise PaginaBloqueada(href)
+
+    @staticmethod
+    def _achar_sentenca(tab) -> tuple[str, str] | None:
+        """Na tabela de eventos, devolve (doc_href, movimento) da sentença, se houver."""
         candidato = None
         for r in tab.query_selector_all("tr"):
             low = (r.inner_text() or "").lower()
@@ -200,7 +266,7 @@ class Coletor:
             mov = (r.inner_text() or "").strip().split("\t")
             mov = mov[2] if len(mov) > 2 else (r.inner_text() or "").strip()[:80]
             par = (a.get_attribute("href"), mov)
-            if "resolu" in low and "mérito" in low or "merito" in low:
+            if ("resolu" in low and "mérito" in low) or "merito" in low:
                 return par  # melhor caso
             candidato = candidato or par
         return candidato
