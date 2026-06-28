@@ -1,4 +1,0 @@
-# Um CNPJ por linha (com ou sem pontuação — o pipeline normaliza pra só dígitos).
-# Linhas começando com # são ignoradas.
-# Ex.:
-# 11.222.333/0001-81
