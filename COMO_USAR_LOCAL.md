@@ -1,70 +1,31 @@
-# Como Usar Localmente
+# Como Usar (João)
 
-Use apenas um arquivo:
+Um arquivo só: **`iniciar.bat`** (duplo clique).
 
-```text
-iniciar.bat
-```
+Ele faz tudo: fecha o Chrome, reabre o Chrome certo (com a porta de depuração) e
+abre o painel no navegador.
 
-Ele abre um menu. Siga sempre esta ordem:
+## Passo a passo
 
-## 1. Preparar Sistema
+1. **Duplo clique em `iniciar.bat`.**
 
-No menu, escolha:
+2. No **Chrome** que abriu, faça a consulta de um CNPJ no TRF4 e **resolva o
+   Turnstile** (o "não sou robô" da Cloudflare), se aparecer. Deixe essa janela
+   aberta.
 
-```text
-1 - Preparar sistema
-```
+3. No **painel** (abriu no navegador), cole os CNPJs — um por linha, só números:
 
-Isso abre:
+   ```
+   81243735000148
+   ```
 
-- o painel em `http://127.0.0.1:8000`;
-- o Chrome correto do TRF4, com a porta `9222`.
+4. Clique **▶ Coletar**. Espere. O sistema entra no TRF4, lê as sentenças,
+   descobre o tema e grava na planilha. As linhas novas aparecem na tela.
 
-No painel, o login local é:
+## Dicas
 
-```text
-usuario: admin
-senha: trocar
-```
-
-## 2. Adicionar CNPJs
-
-No painel, cole os CNPJs e clique em **Adicionar à fila**.
-
-Exemplo:
-
-```text
-81243735000148
-```
-
-## 3. Resolver o Turnstile
-
-No Chrome do TRF4 que abriu, resolva o Turnstile/Cloudflare se aparecer.
-
-Deixe esse Chrome aberto.
-
-## 4. Processar Fila
-
-Volte ao menu e escolha:
-
-```text
-2 - Processar fila
-```
-
-Deixe a janela aberta. O agente consulta o TRF4, envia a sentença para IA e grava os prospects na planilha.
-
-## Se Der Erro
-
-No menu, escolha:
-
-```text
-4 - Voltar erros para pendente
-```
-
-Depois repita:
-
-```text
-1 - Preparar sistema
-2 - Processar fila
-```
+- **Limite por CNPJ**: deixe `0` para varrer todos os processos. Coloque um número
+  (ex.: `5`) só para testar rápido.
+- Se der erro de conexão, confirme que o **Chrome da etapa 2 está aberto** e que o
+  Turnstile foi resolvido. Depois clique **Coletar** de novo.
+- Processos que já estão na planilha não são gravados de novo (sem duplicar).

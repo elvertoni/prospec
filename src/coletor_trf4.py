@@ -22,7 +22,6 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-from . import datajud
 from .util import CNJ, so_digitos
 
 RAIZ = Path(__file__).resolve().parent.parent
@@ -68,8 +67,13 @@ class Coletor:
         self,
         cnpjs: list[str],
         limite: int | None = None,
-        prefiltrar_datajud: bool = True,
     ) -> list[ProcessoColetado]:
+        """Varre TODOS os processos do CNPJ e abre os que têm sentença.
+
+        Sem pré-filtro: não perde tema. `limite` corta nº de processos por CNPJ
+        (teste/throttle). `on_processo` opcional não existe aqui — quem itera
+        consome a lista devolvida.
+        """
         out: list[ProcessoColetado] = []
         with sync_playwright() as p:
             try:
@@ -90,8 +94,6 @@ class Coletor:
                     out.append(ProcessoColetado(cnpj_num, "", erro=f"lista: {e}"))
                     continue
                 print(f"  {len(procs)} processos na lista")
-                if prefiltrar_datajud:
-                    procs = self._prefiltrar_datajud(procs)
                 if limite:
                     procs = procs[:limite]
                 for numero, href in procs:
@@ -109,27 +111,6 @@ class Coletor:
                         rc.erro = f"coleta: {e}"
                     out.append(rc)
             return out
-
-    def _prefiltrar_datajud(self, procs: list[tuple[str, str]]) -> list[tuple[str, str]]:
-        """Usa DataJud para abrir no eProc só processos tributários com sentença."""
-        if not procs:
-            return procs
-        try:
-            regs = datajud.consultar_varios([num for num, _ in procs])
-        except Exception as e:  # noqa: BLE001
-            print(f"  DataJud indisponível; seguindo sem pré-filtro: {e}")
-            return procs
-        if not regs:
-            print("  DataJud não retornou registros; seguindo sem pré-filtro")
-            return procs
-
-        filtrados = []
-        for num, href in procs:
-            reg = regs.get(so_digitos(num))
-            if reg and datajud.vale_coletar(reg):
-                filtrados.append((num, href))
-        print(f"  {len(filtrados)} candidatos após DataJud (tributário + sentença)")
-        return filtrados
 
     # --- passos internos -------------------------------------------------
     def _listar(self, pg, cnpj: str) -> list[tuple[str, str]]:

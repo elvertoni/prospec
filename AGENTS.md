@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This repository is a Python MVP for tax-prospect triage. Core pipeline modules live in `src/`: collection (`coletor_trf4.py`), extraction (`extrator.py`), AI classification (`classificador.py`), ranking, Sheets integration, and orchestration (`pipeline.py`). The hosted FastAPI panel and queue are in `server/`, with HTML templates in `server/templates/`. The local polling worker for Joao's PC is in `agente/`. Runtime inputs and local artifacts belong under `data/`; credentials belong under `credentials/` and must not be committed. `dashboard.py` is the local Streamlit operational UI.
+This repository is a Python MVP for tax-prospect triage. It is a single local Streamlit app: `app.py` orchestrates the `src/` pipeline — collection (`coletor_trf4.py`), extraction (`extrator.py`), AI theme classification (`classificador.py`), and Sheets integration (`sheets.py`). Output is a 3-column Google Sheet (`NOME CLIENTE | NUMERO DO PROCESSO | TEMA DA DISCUSSAO`). Runtime inputs and local artifacts belong under `data/`; credentials belong under `credentials/` and must not be committed. There is no server/queue/worker — scraping runs locally because the TRF4 Cloudflare Turnstile blocks datacenters.
 
 ## Build, Test, and Development Commands
 
@@ -14,19 +14,17 @@ uv pip install --python .venv\Scripts\python.exe -r requirements.txt
 .venv\Scripts\python.exe -m playwright install chromium
 ```
 
-Run the local pipeline from `data/cnpjs.txt`:
+Run the app (Chrome with `--remote-debugging-port=9222` must be open with the Turnstile solved):
 
 ```powershell
-.venv\Scripts\python.exe -m src.pipeline
+.venv\Scripts\streamlit.exe run app.py
 ```
 
-Run one CNPJ with a process limit:
+`iniciar.bat` wraps this: it opens the debug Chrome and starts Streamlit. After editing, smoke-check imports:
 
 ```powershell
-.venv\Scripts\python.exe -m src.pipeline 81243735000148 --limite 5
+.venv\Scripts\python.exe -c "from src import coletor_trf4, classificador, extrator, sheets, util"
 ```
-
-Start the local dashboard with `.venv\Scripts\streamlit.exe run dashboard.py`. Start the hosted server locally with `.venv\Scripts\python.exe -m uvicorn server.app:app --reload`. Run the local worker with `.venv\Scripts\python.exe -m agente.agente --loop`.
 
 ## Coding Style & Naming Conventions
 
@@ -34,7 +32,7 @@ Use Python 3.12-compatible code, four-space indentation, and clear snake_case na
 
 ## Testing Guidelines
 
-No formal test suite is currently present. When adding tests, place them under `tests/` and name files `test_<module>.py`. Mock external services such as TRF4, Gemini, Google Sheets, and the FastAPI queue; do not rely on live credentials or Cloudflare-protected pages in automated tests.
+No formal test suite is currently present. When adding tests, place them under `tests/` and name files `test_<module>.py`. Mock external services such as TRF4, Gemini, and Google Sheets; do not rely on live credentials or Cloudflare-protected pages in automated tests.
 
 ## Commit & Pull Request Guidelines
 

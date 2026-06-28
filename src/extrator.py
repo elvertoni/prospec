@@ -1,59 +1,28 @@
-"""PDF de sentença -> texto plano (relatório + dispositivo) para a IA.
+"""Texto da sentença -> trecho do RELATÓRIO que revela o tema.
 
-O classificador trata ruído de OCR, então aqui só extraímos e recortamos os
-trechos mais úteis: o RELATÓRIO e o DISPOSITIVO (a partir de gatilhos como
-"Ante o exposto"). Se nada for encontrado, devolve o texto inteiro.
+O coletor entrega o texto do documento (HTML do eProc). Aqui isolamos o começo
+do relatório — onde a sentença diz "Trata-se de ação..." — que é o que o
+advogado leria para saber do que se trata. É esse trecho que vai para a IA.
 """
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
-GATILHOS_DISPOSITIVO = ["ante o exposto", "isto posto", "isso posto", "julgo"]
-
-
-def pdf_para_texto(caminho_pdf: str | Path) -> str:
-    """Extrai todo o texto do PDF (camada de texto; sem OCR aqui)."""
-    import pdfplumber  # lazy: só o modo --pdf precisa; servidor não carrega
-    partes: list[str] = []
-    with pdfplumber.open(str(caminho_pdf)) as pdf:
-        for pagina in pdf.pages:
-            partes.append(pagina.extract_text() or "")
-    return "\n".join(partes).strip()
+_MAX = 1800  # chars enviados à IA: contexto suficiente, baixo custo
 
 
-def recortar_relatorio_e_dispositivo(texto: str, max_chars: int = 12000) -> str:
-    """Tenta isolar relatório + dispositivo para reduzir tokens enviados à IA.
-
-    Heurística simples: pega do primeiro "RELATÓRIO" até o fim do dispositivo.
-    Se não achar marcadores, devolve os primeiros max_chars.
-    """
-    if not texto:
+def trecho_para_tema(texto: str) -> str:
+    """Início do relatório (até ~1800 chars). Vazio se não houver texto."""
+    if not (texto or "").strip():
         return ""
-
     baixo = texto.lower()
-    inicio = baixo.find("relat")  # "relatório" / "relatorio"
-    if inicio == -1:
-        inicio = 0
-
-    fim = len(texto)
-    for gat in GATILHOS_DISPOSITIVO:
-        pos = baixo.find(gat, inicio)
-        if pos != -1:
-            # do gatilho do dispositivo, leva mais ~2000 chars (texto da decisão)
-            fim = min(len(texto), pos + 2000)
-            break
-
-    trecho = texto[inicio:fim].strip()
-    return trecho[:max_chars] if trecho else texto[:max_chars]
-
-
-def primeiro_paragrafo_relatorio(texto: str) -> str:
-    """Primeiro parágrafo do relatório — o que o João lê pra saber o tema."""
-    baixo = texto.lower()
-    i = baixo.find("relat")
+    i = baixo.find("relat")  # "relatório" / "relatorio"
     if i == -1:
         i = 0
-    resto = texto[i:]
+    resto = texto[i:].strip()
+    # primeiro parágrafo costuma trazer "Trata-se de..."; se for curto, leva mais
     paragrafos = [p.strip() for p in re.split(r"\n\s*\n", resto) if p.strip()]
-    return paragrafos[0] if paragrafos else resto[:600]
+    trecho = paragrafos[0] if paragrafos else resto
+    if len(trecho) < 200 and len(paragrafos) > 1:
+        trecho = " ".join(paragrafos[:2])
+    return trecho[:_MAX]

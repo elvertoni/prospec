@@ -1,7 +1,8 @@
 """Persistência em Google Sheets via service account (gspread).
 
-A planilha é o "banco" do MVP — advogados validam a triagem direto nela.
-Cabeçalho criado na primeira execução. Cada processo classificado = 1 linha.
+Planilha de 3 colunas — o pedido do escritório:
+    NOME CLIENTE | NUMERO DO PROCESSO | TEMA DA DISCUSSAO
+Cada processo com sentença = 1 linha. Dedup por número do processo.
 """
 from __future__ import annotations
 
@@ -10,16 +11,9 @@ import os
 import gspread
 from google.oauth2.service_account import Credentials
 
-from .enriquecimento import enriquecer_registro
-
 ESCOPOS = ["https://www.googleapis.com/auth/spreadsheets"]
 
-CABECALHO = [
-    "nome_cliente", "cnpj", "numero_processo", "polo", "tema_discussao",
-    "tese_codigo", "tese_especifica", "resultado", "transitou_em_julgado",
-    "oportunidade_prospeccao", "justificativa_oportunidade", "nova_tese_potencial",
-    "trecho_evidencia", "confianca", "sigiloso", "observacao",
-]
+CABECALHO = ["NOME CLIENTE", "NUMERO DO PROCESSO", "TEMA DA DISCUSSÃO"]
 
 
 def _abrir_worksheet():
@@ -42,21 +36,14 @@ def _abrir_worksheet():
 def numeros_ja_gravados(ws=None) -> set[str]:
     """Set de numero_processo já na planilha — evita duplicar."""
     ws = ws or _abrir_worksheet()
-    col_idx = CABECALHO.index("numero_processo") + 1
+    col_idx = CABECALHO.index("NUMERO DO PROCESSO") + 1
     return {v for v in ws.col_values(col_idx)[1:] if v}
 
 
-def gravar(registro: dict, ws=None) -> None:
-    """Append de uma linha na planilha a partir do dict da triagem."""
+def gravar(nome_cliente: str, numero_processo: str, tema: str, ws=None) -> None:
+    """Append de uma linha [nome, numero, tema]."""
     ws = ws or _abrir_worksheet()
-    enriquecer_registro(registro)
-    linha = [_fmt(registro.get(c)) for c in CABECALHO]
-    ws.append_row(linha, value_input_option="USER_ENTERED")
-
-
-def _fmt(v) -> str:
-    if v is None:
-        return ""
-    if isinstance(v, bool):
-        return "sim" if v else "nao"
-    return str(v)
+    ws.append_row(
+        [nome_cliente or "", numero_processo or "", tema or ""],
+        value_input_option="USER_ENTERED",
+    )

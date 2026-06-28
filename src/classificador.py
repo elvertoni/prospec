@@ -1,7 +1,8 @@
-"""Classifica o texto de UM processo via Gemini, usando o prompt.xml do escritório.
+"""Classifica o TEMA de uma sentença via Gemini.
 
-O XML é o System Instruction (persona, vocabulário de teses, formato de saída).
-Cada chamada manda os dados de UM processo e recebe um único objeto JSON.
+Recebe o 1º parágrafo do relatório (o que o advogado leria para saber do que se
+trata) e devolve um rótulo curto de tema — ex.: "PIS/COFINS", "IRPJ/CSLL".
+Nada além do tema: a triagem é só para preencher a planilha de 3 colunas.
 """
 from __future__ import annotations
 
@@ -14,55 +15,36 @@ from google.genai import types
 
 PROMPT_XML = Path(__file__).with_name("prompt.xml")
 
-# Campos esperados na saída (mantém em sincronia com <formato_saida> do XML).
-CAMPOS_SAIDA = [
-    "nome_cliente", "cnpj", "numero_processo", "polo", "tema_discussao",
-    "tese_codigo", "tese_especifica", "resultado", "transitou_em_julgado",
-    "oportunidade_prospeccao", "justificativa_oportunidade", "nova_tese_potencial",
-    "trecho_evidencia", "confianca", "sigiloso", "observacao",
-]
 
-
-def _carregar_system_instruction() -> str:
+def _system_instruction() -> str:
     return PROMPT_XML.read_text(encoding="utf-8")
 
 
-def montar_entrada(nome_parte: str | None, numero_processo: str, texto: str) -> str:
-    """Formata o turno do usuário conforme <entrada> do XML."""
-    nome = nome_parte or "nao_informado"
-    return (
-        f'METADADOS: parte = "{nome}"; numero_processo = "{numero_processo}".\n'
-        f"TEXTO: {texto}"
-    )
-
-
-def classificar(
-    nome_parte: str | None,
-    numero_processo: str,
+def classificar_tema(
     texto: str,
     *,
+    numero_processo: str = "",
     model: str = "gemini-2.5-flash",
     temperature: float = 0.1,
     top_p: float = 0.95,
     api_key: str | None = None,
-) -> dict:
-    """Devolve o dict JSON da triagem. Levanta se a API falhar."""
+) -> str:
+    """Devolve o rótulo do tema. String vazia se não der para identificar."""
+    if not (texto or "").strip():
+        return ""
     key = api_key or os.environ["GEMINI_API_KEY"]
     client = genai.Client(api_key=key)
 
     cfg = types.GenerateContentConfig(
-        system_instruction=_carregar_system_instruction(),
+        system_instruction=_system_instruction(),
         temperature=temperature,
         top_p=top_p,
         response_mime_type="application/json",
     )
-    resp = client.models.generate_content(
-        model=model,
-        contents=montar_entrada(nome_parte, numero_processo, texto),
-        config=cfg,
-    )
-    dados = json.loads(resp.text)
-    # garante todas as chaves (preenche faltantes com None)
-    for campo in CAMPOS_SAIDA:
-        dados.setdefault(campo, None)
-    return dados
+    entrada = f'numero_processo = "{numero_processo}".\nTEXTO: {texto}'
+    resp = client.models.generate_content(model=model, contents=entrada, config=cfg)
+    try:
+        dados = json.loads(resp.text)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    return str(dados.get("tema_discussao") or "").strip()
