@@ -67,12 +67,13 @@ class Coletor:
         self,
         cnpjs: list[str],
         limite: int | None = None,
+        on_status=None,
     ) -> list[ProcessoColetado]:
         """Varre TODOS os processos do CNPJ e abre os que têm sentença.
 
         Sem pré-filtro: não perde tema. `limite` corta nº de processos por CNPJ
-        (teste/throttle). `on_processo` opcional não existe aqui — quem itera
-        consome a lista devolvida.
+        (teste/throttle). `on_status(msg)` é um callback opcional de progresso
+        (usado pelo painel para mostrar o que está acontecendo).
         """
         out: list[ProcessoColetado] = []
         with sync_playwright() as p:
@@ -87,24 +88,34 @@ class Coletor:
             pg = ctx.pages[0] if ctx.pages else ctx.new_page()
             for cnpj in cnpjs:
                 cnpj_num = so_digitos(cnpj)
+                if on_status:
+                    on_status(f"Iniciando coleta para o CNPJ {cnpj_num}...")
                 print(f"[CNPJ] {cnpj_num}")
                 try:
-                    procs = self._listar(pg, cnpj_num)
+                    procs = self._listar(pg, cnpj_num, on_status=on_status)
                 except Exception as e:  # noqa: BLE001
                     out.append(ProcessoColetado(cnpj_num, "", erro=f"lista: {e}"))
                     continue
                 print(f"  {len(procs)} processos na lista")
+                if on_status:
+                    on_status(f"CNPJ {cnpj_num}: {len(procs)} processos encontrados.")
                 if limite:
                     procs = procs[:limite]
                 for numero, href in procs:
                     rc = ProcessoColetado(cnpj=cnpj_num, numero_processo=numero)
                     try:
+                        if on_status:
+                            on_status(f"Processo {numero}: acessando detalhes...")
                         sent = self._sentenca(pg, href)
                         if not sent:
                             rc.erro = "sem sentença de mérito"
+                            if on_status:
+                                on_status(f"Processo {numero}: sem sentença de mérito.")
                         else:
                             doc_href, mov = sent
                             rc.movimento = mov
+                            if on_status:
+                                on_status(f"Processo {numero}: baixando sentença ({mov})...")
                             rc.texto = self._texto_doc(ctx, doc_href)
                             rc.nome_parte = nome_parte_ativa(rc.texto)
                     except Exception as e:  # noqa: BLE001
@@ -113,9 +124,24 @@ class Coletor:
             return out
 
     # --- passos internos -------------------------------------------------
-    def _listar(self, pg, cnpj: str) -> list[tuple[str, str]]:
+    def _listar(self, pg, cnpj: str, on_status=None) -> list[tuple[str, str]]:
         pg.goto(URL_LISTA.format(cnpj=cnpj), timeout=40000, wait_until="load")
-        pg.wait_for_timeout(2500)
+
+        # Espera ativa: o Turnstile pode aparecer. Aguarda até a lista carregar
+        # (links com nº CNJ) ou a página dizer que não há processos.
+        for i in range(120):
+            corpo = (pg.inner_text("body") or "").lower()
+            sem_registro = "nenhum registro" in corpo or "não foram encontrados" in corpo
+            tem_links = any(CNJ.search((a.inner_text() or "")) for a in pg.query_selector_all("a"))
+            if tem_links or sem_registro:
+                break
+            if on_status and i % 5 == 0:
+                on_status("⚠️ Desafio Cloudflare (Turnstile) detectado. "
+                          "Resolva-o na janela do Chrome para prosseguir.")
+            pg.wait_for_timeout(1000)
+        else:
+            raise TimeoutError("Tempo esgotado esperando o Turnstile/carregamento dos processos.")
+
         vistos, procs = set(), []
         for a in pg.query_selector_all("a"):
             href = a.get_attribute("href") or ""
