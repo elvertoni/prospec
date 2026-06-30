@@ -1,18 +1,17 @@
-"""Painel local de prospecção tributária TRF4 (Streamlit).
+"""Painel de controle de prospecção tributária TRF4 (Streamlit v2).
 
-Uma página: digite CNPJ(s) -> ▶ Iniciar Coleta. O painel abre o Chrome de
-depuração se preciso, raspa o TRF4 via CDP, classifica o tema com IA e grava
-na planilha de 3 colunas (NOME CLIENTE | NUMERO DO PROCESSO | TEMA DA DISCUSSAO).
+Duas abas:
+1. 📋 Enfileirar CNPJs — adiciona lotes à fila SQLite
+2. 📊 Dashboard — monitora worker, sessão Chrome e processos
 
-Pré-requisito (Cloudflare Turnstile): no Chrome que abrir, faça uma consulta e
-resolva o Turnstile uma vez; deixe a janela aberta.
-
-Rodar:
-    .venv\\Scripts\\streamlit.exe run app.py
+O worker desacoplado (worker.py) consome a fila, raspa o TRF4 via CDP,
+classifica temas com IA e grava na planilha.
 """
 from __future__ import annotations
 
+import json
 import os
+import sqlite3
 import subprocess
 import time
 import urllib.request
@@ -20,29 +19,40 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-import yaml
 from dotenv import load_dotenv
 
-from src import extrator, sheets
-from src.classificador import classificar_tema
-from src.coletor_trf4 import Coletor
-from src.util import so_digitos
+# src.fila — persistência SQLite com máquina de estados (criado pelo Agente A)
+from src.fila import criar_lote, listar_lotes
 
 RAIZ = Path(__file__).resolve().parent
 load_dotenv(RAIZ / ".env")
 
 CDP_URL = "http://127.0.0.1:9222"
-PERFIL_DIR = RAIZ / "data" / "chrome-debug"
+DB_PATH = RAIZ / "data" / "fila.sqlite"
 LOGO = RAIZ / "RMSA_Logo-Horizontal-Padrao.png.webp"
 
-st.set_page_config(page_title="Prospecção Tributária — RMSA", page_icon="⚖️", layout="wide")
+st.set_page_config(
+    page_title="Prospecção Tributária — RMSA",
+    page_icon="⚖️",
+    layout="wide",
+)
 
 
-def carregar_cfg() -> dict:
-    return yaml.safe_load((RAIZ / "config.yaml").read_text(encoding="utf-8"))
+# ═══════════════════════════════════════════════════════════════════════════
+# Helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _conectar_db() -> sqlite3.Connection | None:
+    """Conecta ao SQLite da fila. Retorna None se o arquivo ainda não existir."""
+    if not DB_PATH.exists():
+        return None
+    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def porta_debug_ativa() -> bool:
+    """Verifica se o Chrome de depuração está respondendo no CDP."""
     try:
         with urllib.request.urlopen(f"{CDP_URL}/json/version", timeout=2) as r:
             return r.status == 200
@@ -50,171 +60,343 @@ def porta_debug_ativa() -> bool:
         return False
 
 
-def abrir_chrome() -> bool:
-    """Abre o Chrome com a porta de depuração se ainda não estiver ativa."""
-    if porta_debug_ativa():
-        return True
-    localapp = os.environ.get("LOCALAPPDATA", "")
-    candidatos = [
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-        os.path.join(localapp, r"Google\Chrome\Application\chrome.exe") if localapp else "",
-    ]
-    exe = next((c for c in candidatos if c and Path(c).exists()), None)
-    if not exe:
-        return False
-    PERFIL_DIR.mkdir(parents=True, exist_ok=True)
-    # perfil dedicado garante instância separada mesmo com Chrome normal aberto
-    subprocess.Popen([
-        exe, "--remote-debugging-port=9222",
-        f"--user-data-dir={PERFIL_DIR.resolve()}", "about:blank",
-    ])
-    for _ in range(20):  # Chrome frio pode demorar; espera até ~10s
-        time.sleep(0.5)
-        if porta_debug_ativa():
-            return True
-    return False
+def status_chrome() -> tuple[str, str, str]:
+    """Retorna (emoji, rótulo, cor_streamlit).
 
+    🟢 verde  = conectado com sessão TRF4 ativa
+    🔴 vermelho = offline (porta 9222 não responde)
+    🟠 laranja = conectado mas potencialmente frio
+    """
+    if not porta_debug_ativa():
+        return "🔴", "Offline — Chrome não responde na porta 9222", "red"
 
-# ---------- UI ----------
-if LOGO.exists():
-    st.image(str(LOGO), width=320)
-else:
-    st.markdown("### Roveda e Marcelino Sociedade de Advogados")
+    try:
+        with urllib.request.urlopen(f"{CDP_URL}/json", timeout=2) as r:
+            pages = json.loads(r.read().decode())
+    except Exception:
+        return "🟠", "Conectado (não foi possível inspecionar abas)", "orange"
 
-st.title("⚖️ Prospecção de Teses Tributárias — TRF4")
-st.caption("Digite os CNPJs, clique em Coletar. A planilha enche com nome, processo e tema. "
-           "Triagem por IA para validação humana (JFPR).")
+    if not pages:
+        return "🟠", "Conectado (sem abas abertas)", "orange"
 
-with st.expander("ℹ️ Como funciona o Chrome + Turnstile", expanded=False):
-    st.markdown(
-        "O TRF4 usa Cloudflare Turnstile (anti-robô). O painel abre um Chrome "
-        "dedicado na porta 9222. **Na primeira consulta, resolva o Turnstile** "
-        "naquela janela e deixe-a aberta — o coletor reaproveita a sessão."
+    tem_trf4 = any(
+        "trf4" in p.get("title", "").lower()
+        or "tribunal" in p.get("title", "").lower()
+        or "processo" in p.get("url", "").lower()
+        for p in pages
     )
-
-col_input, col_config = st.columns([2, 1])
-with col_input:
-    texto_cnpjs = st.text_area(
-        "CNPJs (um por linha, só números):", height=150,
-        placeholder="81243735000148\n11222333000181",
-    )
-    cnpjs = [so_digitos(l) for l in texto_cnpjs.splitlines() if so_digitos(l)]
-with col_config:
-    limite = st.number_input(
-        "Limite de processos por CNPJ (0 = todos):", min_value=0, value=0, step=1,
-        help="Útil para teste rápido ou empresas com muitos processos.",
-    )
-    rodar = st.button("▶️ Iniciar Coleta", type="primary",
-                      use_container_width=True, disabled=not cnpjs)
-
-# ---------- Execução ----------
-if rodar:
-    if not cnpjs:
-        st.warning("Insira ao menos um CNPJ.")
-        st.stop()
-
-    if porta_debug_ativa():
-        st.caption("✅ Chrome de depuração conectado.")
+    if tem_trf4:
+        return "🟢", "Conectado — Sessão TRF4 ativa", "green"
     else:
-        aviso = st.empty()
-        aviso.warning("🌐 Abrindo o Chrome de depuração...")
-        if not abrir_chrome():
-            aviso.error("❌ Não consegui abrir o Chrome. Abra manualmente com "
-                        "--remote-debugging-port=9222 e tente de novo.")
-            st.stop()
-        aviso.info("🌐 Chrome aberto. Se aparecer o Turnstile, resolva na janela.")
+        return "🟠", "Conectado (sessão pode estar fria — reaqueça o Chrome)", "orange"
 
-    novos: list[dict] = []
-    erros_lista: list[str] = []
-    bloqueados = 0
-    sessao_degradou = False
 
-    with st.status("Coletando no TRF4...", expanded=True) as status:
-        def log(msg: str):
-            status.write(msg)
+def _contar_por_estado() -> dict[str, int]:
+    """Lê contagens de processos agrupadas por estado (dashboard)."""
+    conn = _conectar_db()
+    if conn is None:
+        return {"pendente": 0, "concluido": 0, "erro": 0, "bloqueado": 0}
+    try:
+        cur = conn.execute(
+            "SELECT estado, COUNT(*) AS cnt FROM processos GROUP BY estado"
+        )
+        contagens = {row["estado"]: row["cnt"] for row in cur.fetchall()}
+    except Exception:
+        contagens = {}
+    finally:
+        conn.close()
+
+    return {
+        "pendente": (
+            contagens.get("pendente", 0)
+            + contagens.get("buscando", 0)
+        ),
+        "concluido": (
+            contagens.get("concluido", 0)
+            + contagens.get("classificado", 0)
+            + contagens.get("classificando", 0)
+        ),
+        "erro": (
+            contagens.get("erro", 0)
+            + contagens.get("erro_ia", 0)
+        ),
+        "bloqueado": contagens.get("bloqueado", 0),
+    }
+
+
+def _processos_recentes(limit: int = 50) -> list[dict]:
+    """Retorna os processos mais recentes para a tabela do dashboard."""
+    conn = _conectar_db()
+    if conn is None:
+        return []
+    try:
+        cur = conn.execute(
+            """SELECT id, lote_id, cnpj, numero_processo, nome_parte,
+                      estado, tema_discussao, erro, tentativas, atualizado_em
+               FROM processos
+               ORDER BY atualizado_em DESC
+               LIMIT ?""",
+            (limit,),
+        )
+        rows = [dict(row) for row in cur.fetchall()]
+    except Exception:
+        rows = []
+    finally:
+        conn.close()
+    return rows
+
+
+def _worker_ativo() -> bool:
+    """Verifica se o subprocesso do worker ainda está rodando."""
+    proc = st.session_state.get("worker_process")
+    if proc is None:
+        return False
+    return proc.poll() is None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Aba 1 — Enfileirar CNPJs
+# ═══════════════════════════════════════════════════════════════════════════
+
+def aba_enfileirar():
+    """Formulário para criar um lote de CNPJs na fila."""
+    from src.util import so_digitos
+
+    texto_cnpjs = st.text_area(
+        "CNPJs (um por linha, só números):",
+        height=150,
+        placeholder="81243735000148\n11222333000181",
+        key="enfileirar_cnpjs",
+    )
+
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        limite = st.number_input(
+            "Limite de processos por CNPJ (0 = todos):",
+            min_value=0,
+            value=0,
+            step=1,
+            help="Útil para teste rápido ou empresas com muitos processos.",
+            key="enfileirar_limite",
+        )
+    with col2:
+        st.write("")  # espaçamento
+        st.write("")
+        enfileirar_btn = st.button(
+            "📥 Enfileirar",
+            type="primary",
+            use_container_width=True,
+            disabled=not texto_cnpjs.strip(),
+            key="enfileirar_btn",
+        )
+
+    if enfileirar_btn:
+        cnpjs = [so_digitos(l) for l in texto_cnpjs.splitlines() if so_digitos(l)]
+        if not cnpjs:
+            st.warning("Insira ao menos um CNPJ válido.")
+            return
 
         try:
-            cfg = carregar_cfg()
-            g = cfg["gemini"]
-            coletor = Coletor(config=cfg)
+            lote_id = criar_lote(cnpjs, limite=limite)
+            st.success(
+                f"✅ **{len(cnpjs)}** CNPJ(s) enfileirado(s) no lote **#{lote_id}** "
+                f"(limite: {limite or 'todos'} processos por CNPJ)."
+            )
+            st.info("💡 Vá para a aba **📊 Dashboard** e inicie o worker para processar.")
+        except Exception as e:
+            st.error(f"❌ Erro ao criar lote: {e}")
 
-            log("🔗 Conectando à planilha...")
-            ws = sheets._abrir_worksheet()
-            ja = sheets.numeros_ja_gravados(ws)
 
-            log("🔎 Buscando processos no TRF4...")
-            procs = coletor.coletar_cnpjs(cnpjs, limite=limite or None, on_status=log)
+# ═══════════════════════════════════════════════════════════════════════════
+# Aba 2 — Dashboard
+# ═══════════════════════════════════════════════════════════════════════════
 
-            erros_lista = [p.erro for p in procs if not p.numero_processo and p.erro]
-            sessao_degradou = any(
-                (p.erro or "").startswith("SESSAO_DEGRADADA") for p in procs)
-            pulados_sentenca = pulados_planilha = bloqueados = 0
+def aba_dashboard():
+    """Painel de monitoramento: cards, status da sessão, worker e tabela."""
 
-            for proc in procs:
-                if not proc.numero_processo:
-                    continue
-                if proc.numero_processo in ja:
-                    pulados_planilha += 1
-                    log(f"⏭️ {proc.numero_processo}: já estava na planilha")
-                    continue
-                if proc.bloqueado:
-                    bloqueados += 1
-                    log(f"🟡 {proc.numero_processo}: não verificado (portal bloqueou)")
-                    continue
-                if proc.erro or not proc.texto:
-                    pulados_sentenca += 1
-                    log(f"⚪ {proc.numero_processo}: {proc.erro or 'sem texto de sentença'}")
-                    continue
-                log(f"🧠 {proc.numero_processo}: classificando tema com IA...")
-                try:
-                    tema = classificar_tema(
-                        extrator.trecho_para_tema(proc.texto),
-                        numero_processo=proc.numero_processo,
-                        model=g["model"], temperature=g["temperature"],
-                        top_p=g["top_p"], on_status=log,
-                    )
-                except Exception as e:  # noqa: BLE001 — IA falhou: não derruba a coleta
-                    tema = "(reclassificar)"
-                    log(f"⚠️ {proc.numero_processo}: IA falhou ({e}); gravando sem tema.")
-                nome = proc.nome_parte or f"CNPJ {proc.cnpj}"
-                sheets.gravar(nome, proc.numero_processo, tema, ws)
-                ja.add(proc.numero_processo)
-                novos.append({
-                    "NOME CLIENTE": nome,
-                    "NUMERO DO PROCESSO": proc.numero_processo,
-                    "TEMA DA DISCUSSÃO": tema,
-                })
-                log(f"✅ {proc.numero_processo}: {nome} — {tema}")
+    # ── Cards de contagem ──
+    contagens = _contar_por_estado()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("📋 Pendentes", contagens["pendente"])
+    c2.metric("✅ Concluídos", contagens["concluido"])
+    c3.metric("❌ Erros", contagens["erro"])
+    c4.metric("🔒 Bloqueados", contagens["bloqueado"])
 
-            resumo = (f"{len(novos)} gravados · {pulados_sentenca} sem sentença · "
-                      f"{bloqueados} não verificados · {pulados_planilha} já existiam")
-            if sessao_degradou or erros_lista:
-                status.update(label=f"Interrompido — {resumo}", state="error")
-            else:
-                status.update(label=f"Concluído — {resumo}", state="complete")
-        except Exception as e:  # noqa: BLE001
-            log(f"❌ {e}")
-            status.update(label="Falha na coleta", state="error")
-            erros_lista = erros_lista or [str(e)]
+    st.divider()
 
-    # ---- resultado fora do log ----
-    if novos:
-        st.success(f"🎉 {len(novos)} processo(s) novo(s) gravado(s) na planilha.")
-        st.dataframe(pd.DataFrame(novos), use_container_width=True, hide_index=True)
-    if sessao_degradou or bloqueados:
-        st.warning(
-            f"🟡 {bloqueados} processo(s) não verificado(s): o TRF4 parou de entregar "
-            "as páginas (sessão esfriou). **Reaqueça e clique Coletar de novo** — os já "
-            "gravados não repetem, só os pendentes serão tentados.\n\n"
-            "Como reaquecer: no Chrome aberto, refaça a consulta (forma 'CPF/CNPJ da "
-            "Parte', seção 'SJ Paraná'), resolva o Turnstile e deixe a lista carregar.")
-    if not novos and not bloqueados:
-        if erros_lista:
-            st.error("**Não foi possível listar os processos:**\n\n" +
-                     "\n".join(f"- {e}" for e in erros_lista))
-            st.caption("Dica: no Chrome aberto, refaça a consulta (CPF/CNPJ da Parte, "
-                       "SJ Paraná), resolva o Turnstile e deixe a lista carregar; depois Coletar.")
+    # ── Status da sessão Chrome ──
+    emoji, rotulo, cor = status_chrome()
+    st.markdown(f"**Sessão Chrome:** :{cor}[{emoji} {rotulo}]")
+
+    st.divider()
+
+    # ── Controles do Worker ──
+    col_w1, col_w2, col_w3 = st.columns([1, 1, 1])
+    with col_w1:
+        if st.button(
+            "▶️ Iniciar Worker",
+            type="primary",
+            use_container_width=True,
+            disabled=_worker_ativo(),
+            key="btn_iniciar_worker",
+        ):
+            _iniciar_worker()
+    with col_w2:
+        if st.button(
+            "⏹️ Parar Worker",
+            use_container_width=True,
+            disabled=not _worker_ativo(),
+            key="btn_parar_worker",
+        ):
+            _parar_worker()
+    with col_w3:
+        if st.button("🔄 Atualizar", use_container_width=True, key="btn_atualizar"):
+            st.rerun()
+
+    # Status do worker
+    if _worker_ativo():
+        pid = st.session_state.get("worker_pid", "?")
+        st.info(f"⚙️ Worker em execução (PID {pid}).")
+    else:
+        proc = st.session_state.get("worker_process")
+        if proc is not None:
+            ret = proc.poll()
+            st.warning(f"⚠️ Worker encerrou com código {ret}.")
         else:
-            st.info("Nada novo: nenhum processo com sentença de mérito (ou já estavam na "
-                    "planilha). Veja o log acima para o detalhe processo a processo.")
+            st.caption("💤 Worker parado. Clique **Iniciar Worker** para processar a fila.")
+
+    st.divider()
+
+    # ── Auto-refresh toggle ──
+    st.session_state.auto_refresh = st.checkbox(
+        "🔄 Auto-refresh (5s)",
+        value=st.session_state.get("auto_refresh", True),
+        key="auto_refresh_toggle",
+        help="Atualiza o dashboard automaticamente a cada 5 segundos.",
+    )
+
+    st.divider()
+
+    # ── Tabela de processos recentes ──
+    st.subheader("📋 Processos Recentes (últimos 50)")
+    recentes = _processos_recentes(50)
+    if recentes:
+        df = pd.DataFrame(recentes)
+        colunas = [
+            "id", "lote_id", "cnpj", "numero_processo", "nome_parte",
+            "estado", "tema_discussao", "situacao", "patrocinador",
+            "erro", "tentativas", "atualizado_em",
+        ]
+        df_exibir = df[[c for c in colunas if c in df.columns]]
+        st.dataframe(
+            df_exibir,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "id": "ID",
+                "lote_id": "Lote",
+                "cnpj": "CNPJ",
+                "numero_processo": "Processo",
+                "nome_parte": "Parte",
+                "estado": "Estado",
+                "tema_discussao": "Tema",
+                "situacao": "Situação",
+                "patrocinador": "Patrocinador",
+                "erro": "Erro",
+                "tentativas": "Tent.",
+                "atualizado_em": "Atualizado",
+            },
+        )
+    else:
+        st.info("📭 Nenhum processo na fila ainda. Enfileire CNPJs na aba ao lado.")
+
+
+def _iniciar_worker():
+    """Inicia worker.py como subprocesso e armazena no session_state."""
+    proc = st.session_state.get("worker_process")
+    if proc is not None and proc.poll() is None:
+        st.warning("⚠️ Worker já está em execução.")
+        return
+
+    worker_py = RAIZ / "worker.py"
+    if not worker_py.exists():
+        st.error(f"❌ Arquivo não encontrado: {worker_py}")
+        return
+
+    try:
+        proc = subprocess.Popen(
+            ["python", "worker.py"],
+            cwd=str(RAIZ),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        st.session_state.worker_process = proc
+        st.session_state.worker_pid = proc.pid
+        st.success(f"✅ Worker iniciado (PID {proc.pid}).")
+    except Exception as e:
+        st.error(f"❌ Erro ao iniciar worker: {e}")
+
+
+def _parar_worker():
+    """Para o worker (terminate → kill se necessário)."""
+    proc = st.session_state.get("worker_process")
+    if proc is None:
+        st.warning("⚠️ Nenhum worker em execução.")
+        return
+
+    poll = proc.poll()
+    if poll is not None:
+        st.info(f"ℹ️ Worker já encerrou (código {poll}).")
+        st.session_state.worker_process = None
+        st.session_state.worker_pid = None
+        return
+
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        st.success("✅ Worker parado.")
+    except Exception as e:
+        st.error(f"❌ Erro ao parar worker: {e}")
+    finally:
+        st.session_state.worker_process = None
+        st.session_state.worker_pid = None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# UI Principal
+# ═══════════════════════════════════════════════════════════════════════════
+
+def main():
+    # ── Logo e cabeçalho ──
+    if LOGO.exists():
+        st.image(str(LOGO), width=320)
+    else:
+        st.markdown("### Roveda e Marcelino Sociedade de Advogados")
+
+    st.title("⚖️ Prospecção de Teses Tributárias — TRF4")
+    st.caption(
+        "Painel de controle v2: enfileire CNPJs e acompanhe o processamento. "
+        "O worker desacoplado raspa o TRF4, classifica temas com IA e grava na planilha."
+    )
+
+    # ── Abas ──
+    tab1, tab2 = st.tabs(["📋 Enfileirar CNPJs", "📊 Dashboard"])
+
+    with tab1:
+        aba_enfileirar()
+
+    with tab2:
+        aba_dashboard()
+
+    # ── Auto-refresh ──
+    if st.session_state.get("auto_refresh", True):
+        time.sleep(5)
+        st.rerun()
+
+
+if __name__ == "__main__":
+    main()

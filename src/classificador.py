@@ -2,8 +2,9 @@
 
 Multi-modelo: se o `.env` definir LLM_BASE_URL + LLM_API_KEY, usa qualquer API
 compatível com OpenAI (DeepSeek, OpenCode Zen, OpenRouter, etc.); senão, cai no
-Gemini (google-genai). O modelo devolve um rótulo curto de tema — ex.:
-"PIS/COFINS", "IRPJ/CSLL". Nada além do tema (planilha de 3 colunas).
+Gemini (google-genai). O modelo devolve um dict com 'tema_discussao' (descrição
+completa e específica da tese) e 'descricao_completa' (fallback com o parágrafo
+original quando a IA não consegue resumir com precisão).
 
 Confiabilidade: ao bater cota (429), espera e tenta de novo, em vez de derrubar
 a coleta. Parse tolerante: aceita JSON puro ou texto com o JSON embutido.
@@ -33,26 +34,43 @@ def _espera_429(msg: str, default: float = 30.0) -> float:
         return default
 
 
-def _extrair_tema(raw: str | None) -> str:
-    """Extrai tema_discussao de uma resposta que pode vir como JSON puro,
-    JSON dentro de ```...``` ou texto com o objeto embutido."""
+def _extrair_tema(raw: str | None) -> dict:
+    """Extrai tema_discussao e descricao_completa de uma resposta JSON.
+
+    Aceita JSON puro, JSON dentro de ```...``` ou texto com o objeto embutido.
+    Retorna dict com as chaves 'tema_discussao' e 'descricao_completa' —
+    strings vazias se não encontradas.
+    """
+    vazio = {"tema_discussao": "", "descricao_completa": ""}
     if not raw:
-        return ""
+        return vazio
     txt = raw.strip().strip("`")
     txt = re.sub(r"^json\s*", "", txt, flags=re.I)
     try:
-        return str(json.loads(txt).get("tema_discussao") or "").strip()
+        obj = json.loads(txt)
+        return {
+            "tema_discussao": str(obj.get("tema_discussao") or "").strip(),
+            "descricao_completa": str(obj.get("descricao_completa") or "").strip(),
+        }
     except (json.JSONDecodeError, AttributeError, TypeError):
         pass
-    m = re.search(r'"tema_discussao"\s*:\s*"([^"]+)"', raw)
-    return m.group(1).strip() if m else ""
+    # Fallback: regex para cada campo
+    tema = ""
+    desc = ""
+    m = re.search(r'"tema_discussao"\s*:\s*"([^"]*)"', raw)
+    if m:
+        tema = m.group(1).strip()
+    m = re.search(r'"descricao_completa"\s*:\s*"([^"]*)"', raw)
+    if m:
+        desc = m.group(1).strip()
+    return {"tema_discussao": tema, "descricao_completa": desc}
 
 
 def _entrada(numero_processo: str, texto: str) -> str:
     return f'numero_processo = "{numero_processo}".\nTEXTO: {texto}'
 
 
-def _classificar_openai(texto, numero_processo, model, temperature, on_status) -> str:
+def _classificar_openai(texto, numero_processo, model, temperature, on_status) -> dict:
     from openai import OpenAI
     from openai import APIStatusError
 
@@ -79,10 +97,10 @@ def _classificar_openai(texto, numero_processo, model, temperature, on_status) -
                 time.sleep(espera)
                 continue
             raise
-    return ""
+    return {"tema_discussao": "", "descricao_completa": ""}
 
 
-def _classificar_gemini(texto, numero_processo, model, temperature, top_p, api_key, on_status) -> str:
+def _classificar_gemini(texto, numero_processo, model, temperature, top_p, api_key, on_status) -> dict:
     from google import genai
     from google.genai import types
     from google.genai.errors import ClientError
@@ -106,7 +124,7 @@ def _classificar_gemini(texto, numero_processo, model, temperature, top_p, api_k
                 time.sleep(espera)
                 continue
             raise
-    return ""
+    return {"tema_discussao": "", "descricao_completa": ""}
 
 
 def classificar_tema(
@@ -118,11 +136,15 @@ def classificar_tema(
     top_p: float = 0.95,
     api_key: str | None = None,
     on_status=None,
-) -> str:
-    """Devolve o rótulo do tema. Usa LLM compatível-OpenAI se LLM_BASE_URL estiver
-    no .env; senão Gemini. String vazia se não der para identificar."""
+) -> dict:
+    """Devolve dict com 'tema_discussao' e 'descricao_completa'.
+
+    Usa LLM compatível-OpenAI se LLM_BASE_URL estiver no .env; senão Gemini.
+    Retorna dict com strings vazias se não der para identificar.
+    """
+    vazio = {"tema_discussao": "", "descricao_completa": ""}
     if not (texto or "").strip():
-        return ""
+        return vazio
     if os.environ.get("LLM_BASE_URL") and os.environ.get("LLM_API_KEY"):
         modelo = os.environ.get("LLM_MODEL", model)
         return _classificar_openai(texto, numero_processo, modelo, temperature, on_status)

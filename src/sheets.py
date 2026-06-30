@@ -13,7 +13,13 @@ from google.oauth2.service_account import Credentials
 
 ESCOPOS = ["https://www.googleapis.com/auth/spreadsheets"]
 
-CABECALHO = ["NOME CLIENTE", "NUMERO DO PROCESSO", "TEMA DA DISCUSSÃO"]
+CABECALHO = [
+    "NOME CLIENTE",
+    "NUMERO DO PROCESSO",
+    "TEMA DA DISCUSSÃO",
+    "SITUAÇÃO",
+    "PATROCINADOR",
+]
 
 
 def _abrir_worksheet():
@@ -40,10 +46,23 @@ def numeros_ja_gravados(ws=None) -> set[str]:
     return {v for v in ws.col_values(col_idx)[1:] if v}
 
 
-def gravar(nome_cliente: str, numero_processo: str, tema: str, ws=None) -> None:
-    """Append de uma linha [nome, numero, tema]."""
+def gravar(
+    nome_cliente: str,
+    numero_processo: str,
+    tema: str,
+    situacao: str = "",
+    patrocinador: str = "",
+    ws=None,
+) -> None:
+    """Append de uma linha [nome, numero, tema, situacao, patrocinador]."""
     ws = ws or _abrir_worksheet()
     ws.append_row(
-        [nome_cliente or "", numero_processo or "", tema or ""],
+        [
+            nome_cliente or "",
+            numero_processo or "",
+            tema or "",
+            situacao or "",
+            patrocinador or "",
+        ],
         value_input_option="USER_ENTERED",
     )
